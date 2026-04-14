@@ -7,19 +7,6 @@
 
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 
-<<<<<<< ours
-// ========== 巡线参数（先调这里） ==========
-const int BASE_SPEED = 255;      // 基础前进速度（0~255）
-const int MAX_CORRECTION = 140;  // 最大差速修正
-const float KP = 40.0f;          // 比例系数
-const float KD = 95.0f;          // 微分系数
-const float ALPHA = 0.35f;       // 误差低通滤波系数（越小越平滑）
-const int SEARCH_TURN_SPEED = 135; // 丢线后原地找线速度
-
-static float filtered_error = 0.0f;
-static float last_error = 0.0f;
-static int last_turn_direction = 1; // -1=上次向左，1=上次向右
-=======
 // ========== 巡线参数（高速模式） ==========
 const int BASE_SPEED = 255;        // 基础前进速度
 const int MAX_CORRECTION = 150;    // 最大差速修正
@@ -33,7 +20,6 @@ const int REVERSE_THRESHOLD = 40;  // 停转启用阈值
 static float filtered_error = 0.0f;
 static float last_error = 0.0f;
 static int last_turn_direction = 1;
->>>>>>> theirs
 
 float calc_line_error_and_update_direction(bool &line_seen)
 {
@@ -47,7 +33,6 @@ float calc_line_error_and_update_direction(bool &line_seen)
         sensor.ir_right_3
     };
     const int weights[7] = {-3, -2, -1, 0, 1, 2, 3};
-
     int sum = 0;
     int count = 0;
     for (int i = 0; i < 7; ++i)
@@ -87,7 +72,6 @@ void set_led_by_error(float error, bool line_seen)
         // 丢线：黄色警告
         r0 = r1 = 120;
         g0 = g1 = 120;
-<<<<<<< ours
     }
     else if (error > 0.6f)
     {
@@ -107,27 +91,6 @@ void set_led_by_error(float error, bool line_seen)
         r0 = g0 = b0 = 80;
         r1 = g1 = b1 = 80;
     }
-=======
-    }
-    else if (error > 0.6f)
-    {
-        // 偏右明显：右灯偏红
-        r1 = 120;
-        b0 = 40;
-    }
-    else if (error < -0.6f)
-    {
-        // 偏左明显：左灯偏红
-        r0 = 120;
-        b1 = 40;
-    }
-    else
-    {
-        // 中线附近：白色
-        r0 = g0 = b0 = 80;
-        r1 = g1 = b1 = 80;
-    }
->>>>>>> theirs
 
     pixels.setPixelColor(0, pixels.Color(r0, g0, b0));
     pixels.setPixelColor(1, pixels.Color(r1, g1, b1));
@@ -162,29 +125,6 @@ void loop()
         if (correction > MAX_CORRECTION) correction = MAX_CORRECTION;
         if (correction < -MAX_CORRECTION) correction = -MAX_CORRECTION;
 
-<<<<<<< ours
-        // 右偏(error>0)时减小左轮、增大右轮实际会反向；
-        // 当前电机接线下采用下面映射：右偏 -> 左快右慢。
-        motor_left = BASE_SPEED + correction;
-        motor_right = BASE_SPEED - correction;
-
-        if (motor_left > 255) motor_left = 255;
-        if (motor_left < 0) motor_left = 0;
-        if (motor_right > 255) motor_right = 255;
-        if (motor_right < 0) motor_right = 0;
-    }
-    else
-    {
-        // 丢线策略：沿上一次偏转方向原地小幅找线
-        if (last_turn_direction > 0)
-        {
-            motor_left = SEARCH_TURN_SPEED;
-            motor_right = 0;
-        }
-        else
-        {
-            motor_left = 0;
-=======
         // ===== 高速转弯策略：内轮停转，保持整体速度高 =====
         if (ENABLE_REVERSE_TURN && abs(correction) > REVERSE_THRESHOLD)
         {
@@ -238,7 +178,6 @@ void loop()
         else
         {
             motor_left = 0;   // 左轮停转找线（由倒车改为0速）
->>>>>>> theirs
             motor_right = SEARCH_TURN_SPEED;
         }
     }
