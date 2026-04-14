@@ -7,17 +7,19 @@
 
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 
-// ========== 巡线参数（先调这里） ==========
-const int BASE_SPEED = 190;      // 基础前进速度（0~255）
-const int MAX_CORRECTION = 140;  // 最大差速修正
-const float KP = 40.0f;          // 比例系数
-const float KD = 95.0f;          // 微分系数
-const float ALPHA = 0.35f;       // 误差低通滤波系数（越小越平滑）
-const int SEARCH_TURN_SPEED = 135; // 丢线后原地找线速度
+// ========== 巡线参数（高速模式） ==========
+const int BASE_SPEED = 230;        // 基础前进速度【大幅提高到230】
+const int MAX_CORRECTION = 150;    // 最大差速修正【提高到150，允许更大的转向差】
+const float KP = 15.0f;            // 比例系数【降低到15，减少过度反应】
+const float KD = 140.0f;           // 微分系数【增加到140，提高稳定性】
+const float ALPHA = 0.2f;          // 误差低通滤波系数【降低到0.2，强力滤波】
+const int SEARCH_TURN_SPEED = 200; // 丢线后原地找线速度【提高到200】
+const bool ENABLE_REVERSE_TURN = true;   // 启用内轮倒车转弯
+const int REVERSE_THRESHOLD = 40;  // 倒车启用阈值【降低到40，更早启用倒车】
 
 static float filtered_error = 0.0f;
 static float last_error = 0.0f;
-static int last_turn_direction = 1; // -1=上次向左，1=上次向右
+static int last_turn_direction = 1;
 
 float calc_line_error_and_update_direction(bool &line_seen)
 {
@@ -124,27 +126,59 @@ void loop()
         if (correction > MAX_CORRECTION) correction = MAX_CORRECTION;
         if (correction < -MAX_CORRECTION) correction = -MAX_CORRECTION;
 
-        // 右偏(error>0)时减小左轮、增大右轮实际会反向；
-        // 当前电机接线下采用下面映射：右偏 -> 左快右慢。
-        motor_left = BASE_SPEED + correction;
-        motor_right = BASE_SPEED - correction;
-
-        if (motor_left > 255) motor_left = 255;
-        if (motor_left < 0) motor_left = 0;
-        if (motor_right > 255) motor_right = 255;
-        if (motor_right < 0) motor_right = 0;
-    }
-    else
-    {
-        // 丢线策略：沿上一次偏转方向原地小幅找线
-        if (last_turn_direction > 0)
+        // ===== 高速转弯策略：内轮倒车，保持整体速度高 =====
+        if (ENABLE_REVERSE_TURN && abs(correction) > REVERSE_THRESHOLD)
         {
-            motor_left = SEARCH_TURN_SPEED;
-            motor_right = 0;
+            // 大转弯时，外轮加速，内轮倒车
+            if (correction > 0)
+            {
+                // 向右转：左轮快速前进，右轮倒车
+                motor_left = 255;  // 左轮最大速度
+                motor_right = -abs(correction);  // 右轮倒车（速度与转向幅度成正比）
+            }
+            else
+            {
+                // 向左转：右轮快速前进，左轮倒车
+                motor_left = -abs(correction);  // 左轮倒车
+                motor_right = 255;  // 右轮最大速度
+            }
         }
         else
         {
-            motor_left = 0;
+            // 小转弯时，使用差速前进（两轮都前进）
+            motor_left = BASE_SPEED + correction;
+            motor_right = BASE_SPEED - correction;
+
+            // 如果任一轮超过255，缩放以保持转向比例
+            if (motor_left > 255 || motor_right > 255)
+            {
+                float scale = 255.0f / max(motor_left, motor_right);
+                motor_left = (int)(motor_left * scale);
+                motor_right = (int)(motor_right * scale);
+            }
+
+            // 防止倒车
+            if (motor_left < 0) motor_left = 0;
+            if (motor_right < 0) motor_right = 0;
+        }
+
+        // 最终限制
+        if (motor_left > 255) motor_left = 255;
+        if (motor_left < -255) motor_left = -255;
+        if (motor_right > 255) motor_right = 255;
+        if (motor_right < -255) motor_right = -255;
+    }
+    else
+    {
+        // 丢线策略：高速找线
+        if (last_turn_direction > 0)
+        {
+            motor_left = SEARCH_TURN_SPEED;
+            motor_right = -100;  // 右轮倒车找线
+        }
+        else
+        {
+            motor_left = -100;  // 左轮倒车找线
             motor_right = SEARCH_TURN_SPEED;
         }
     }
