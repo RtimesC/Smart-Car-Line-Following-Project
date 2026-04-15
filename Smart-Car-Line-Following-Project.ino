@@ -1,35 +1,27 @@
 #include "comm.h"
 #include "motor.h"
 
-// ===================== 速度参数 =====================
-// 默认档：已经很猛
-int speedStraight = 252;
-int speedMiddle   = 228;
-int speedCorner   = 198;
-int speedRecover  = 170;
+int speedStraight = 255;
+int speedMiddle   = 242;
+int speedCorner   = 212;
+int speedRecover  = 182;
 int maxPWM        = 255;
 
-// ===================== 控制参数 =====================
-// 更激进，减少保守修正
-float Kp = 35.5;
-float Kd = 13.0;
+float Kp = 37.5;
+float Kd = 11.0;
 
-// 误差滤波：比之前更小，更灵敏
 float filteredError = 0.0;
 float lastFilteredError = 0.0;
 
-// 丢线恢复记忆
 float lastGoodError = 0.0;
 unsigned long lastSeenLineMs = 0;
-int lastTurnDir = 0;   // -1 左, 0 中, 1 右
+int lastTurnDir = 0;
 
 bool running = false;
 
-// 左右轮补偿
 int leftBias  = 0;
 int rightBias = 10;
 
-// ===================== 读一次原始7路 =====================
 void readSensorsOnce(int s[7])
 {
     reload_shift_reg();
@@ -42,24 +34,17 @@ void readSensorsOnce(int s[7])
     s[6] = sensor.ir_right_3;
 }
 
-// ===================== 多次采样多数表决 =====================
-// 赛道不平整，所以仍然保留3次，但后面的控制更激进
-void readSensorsFiltered(int s[7])
+void readSensorsFilteredFast(int s[7])
 {
-    int sum[7] = {0,0,0,0,0,0,0};
-    int t[7];
-
-    readSensorsOnce(t);
-    for (int i = 0; i < 7; i++) sum[i] += t[i];
-
-    readSensorsOnce(t);
-    for (int i = 0; i < 7; i++) sum[i] += t[i];
-
-    readSensorsOnce(t);
-    for (int i = 0; i < 7; i++) sum[i] += t[i];
+    int a[7], b[7];
+    readSensorsOnce(a);
+    readSensorsOnce(b);
 
     for (int i = 0; i < 7; i++)
-        s[i] = (sum[i] >= 2) ? 1 : 0;
+    {
+        if (a[i] == b[i]) s[i] = a[i];
+        else s[i] = a[i];
+    }
 }
 
 bool hasLine(int s[7])
@@ -79,8 +64,7 @@ int activeCount(int s[7])
 
 float calcWeightedError(int s[7], int &count)
 {
-    // 再强化一点外侧权重
-    int w[7] = {-7, -4, -1, 0, 1, 4, 7};
+    int w[7] = {-8, -4, -1, 0, 1, 4, 8};
     long sum = 0;
     count = 0;
 
@@ -110,42 +94,40 @@ void driveLR(int left, int right)
     motor_set_PWM(left, right);
 }
 
-// ===================== 连续丢线找回 =====================
 void recoverContinuousFast()
 {
     unsigned long dt = millis() - lastSeenLineMs;
 
-    if (dt < 25)
+    if (dt < 20)
     {
-        if (lastGoodError < -0.20f || lastTurnDir < 0)
-            driveLR(115, speedRecover);
-        else if (lastGoodError > 0.20f || lastTurnDir > 0)
-            driveLR(speedRecover, 115);
+        if (lastGoodError < -0.18f || lastTurnDir < 0)
+            driveLR(125, speedRecover);
+        else if (lastGoodError > 0.18f || lastTurnDir > 0)
+            driveLR(speedRecover, 125);
         else
-            driveLR(155, 155);
+            driveLR(165, 165);
         return;
     }
 
-    if (dt < 80)
+    if (dt < 70)
     {
         if (lastGoodError < 0 || lastTurnDir < 0)
-            driveLR(65, speedRecover + 28);
+            driveLR(75, speedRecover + 30);
         else
-            driveLR(speedRecover + 28, 65);
+            driveLR(speedRecover + 30, 75);
         return;
     }
 
     if (lastGoodError < 0 || lastTurnDir < 0)
-        driveLR(-80, 170);
+        driveLR(-85, 175);
     else
-        driveLR(170, -80);
+        driveLR(175, -85);
 }
 
-// ===================== 主循迹 =====================
-void followTrackMaxSpeed()
+void followTrackMaxPlus()
 {
     int s[7];
-    readSensorsFiltered(s);
+    readSensorsFilteredFast(s);
 
     bool onLine = hasLine(s);
     int cnt = activeCount(s);
@@ -161,50 +143,42 @@ void followTrackMaxSpeed()
     float err = calcWeightedError(s, cnt);
     lastGoodError = err;
 
-    if (err < -0.10f) lastTurnDir = -1;
-    else if (err > 0.10f) lastTurnDir = 1;
+    if (err < -0.08f) lastTurnDir = -1;
+    else if (err > 0.08f) lastTurnDir = 1;
     else lastTurnDir = 0;
 
-    // 更灵敏
-    filteredError = 0.42f * filteredError + 0.58f * err;
+    filteredError = 0.35f * filteredError + 0.65f * err;
 
-    // 死区再缩小
-    if (filteredError > -0.03f && filteredError < 0.03f)
+    if (filteredError > -0.02f && filteredError < 0.02f)
         filteredError = 0.0f;
 
     float dErr = filteredError - lastFilteredError;
     float turn = Kp * filteredError + Kd * dErr;
     lastFilteredError = filteredError;
 
-    // 更高的转向上限
-    if (turn > 135) turn = 135;
-    if (turn < -135) turn = -135;
+    if (turn > 155) turn = 155;
+    if (turn < -155) turn = -155;
 
     int base;
 
-    // 真直线
     if (cnt == 1 && s[3])
     {
         base = speedStraight;
     }
-    // 中间区域，仍然尽量快
     else if ((s[2] && s[3]) || (s[3] && s[4]) || (cnt >= 2 && s[3]))
     {
         base = speedMiddle;
     }
-    // 弯道
     else
     {
         base = speedCorner;
     }
 
-    // 同时亮很多时，少减速
-    if (cnt >= 4) base -= 6;
-    else if (cnt == 3) base -= 3;
+    if (cnt >= 4) base -= 4;
+    else if (cnt == 3) base -= 2;
 
-    // 外侧触发时直接更激进修正
-    if (s[0] && !s[6]) turn -= 34;
-    if (s[6] && !s[0]) turn += 34;
+    if (s[0] && !s[6]) turn -= 44;
+    if (s[6] && !s[0]) turn += 44;
 
     int leftPWM  = base + (int)turn;
     int rightPWM = base - (int)turn;
@@ -222,38 +196,36 @@ void loop()
 {
     reload_shift_reg();
 
-    // KEY1：开始/停止
     if (sensor.key_1)
     {
         while (sensor.key_1) reload_shift_reg();
-        delay(8);
+        delay(6);
         running = !running;
     }
 
-    // KEY2：真正的最猛档
     if (sensor.key_2)
     {
         while (sensor.key_2) reload_shift_reg();
-        delay(8);
+        delay(6);
 
-        if (speedStraight == 252)
+        if (speedStraight == 255)
         {
             speedStraight = 255;
-            speedMiddle   = 238;
-            speedCorner   = 206;
-            speedRecover  = 178;
+            speedMiddle   = 248;
+            speedCorner   = 218;
+            speedRecover  = 188;
         }
         else
         {
-            speedStraight = 252;
-            speedMiddle   = 228;
-            speedCorner   = 198;
-            speedRecover  = 170;
+            speedStraight = 255;
+            speedMiddle   = 242;
+            speedCorner   = 212;
+            speedRecover  = 182;
         }
     }
 
     if (running)
-        followTrackMaxSpeed();
+        followTrackMaxPlus();
     else
         driveLR(0, 0);
 }
