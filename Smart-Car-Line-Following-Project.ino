@@ -1,189 +1,259 @@
-#include "Adafruit_NeoPixel.h"  // 彩色灯珠驱动
-#include "comm.h"               // 传感器数据读取
-#include "motor.h"              // 电机控制
+#include "Adafruit_NeoPixel.h"  //彩色灯珠驱动
+#include "comm.h"               //传感器数据读取
+#include "motor.h"              //电机控制
 
-#define PIN 4
+#define PIN    4
 #define NUMPIXELS 2
-
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 
-// ========== 巡线参数（高速模式） ==========
-const int BASE_SPEED = 255;        // 基础前进速度【大幅提高到230】
-const int MAX_CORRECTION = 150;    // 最大差速修正【提高到150，允许更大的转向差】
-const float KP = 15.0f;            // 比例系数【降低到15，减少过度反应】
-const float KD = 140.0f;           // 微分系数【增加到140，提高稳定性】
-const float ALPHA = 0.2f;          // 误差低通滤波系数【降低到0.2，强力滤波】
-const int SEARCH_TURN_SPEED = 200; // 丢线后原地找线速度【提高到200】
-const bool ENABLE_REVERSE_TURN = true;   // 启用内轮倒车转弯
-const int REVERSE_THRESHOLD = 40;  // 倒车启用阈值【降低到40，更早启用倒车】
+// 电机速度常量
+#define BASE_SPEED    230    // 基础速度
+#define TURN_SPEED    90     // 转弯速度差
+#define MAX_SPEED     255    // 最大速度
+#define MIN_SPEED     0      // 最小速度
+#define BACK_SPEED    100    // 后退速度
 
-static float filtered_error = 0.0f;
-static float last_error = 0.0f;
-static int last_turn_direction = 1;
+// 巡线模式
+enum LineFollowMode {
+  MODE_IDLE,      // 空闲模式
+  MODE_FOLLOW,    // 巡线模式
+  MODE_ROTATE     // 旋转模式
+};
 
-float calc_line_error_and_update_direction(bool &line_seen)
-{
-    const int values[7] = {
-        sensor.ir_left_3,
-        sensor.ir_left_2,
-        sensor.ir_left_1,
-        sensor.ir_mid,
-        sensor.ir_right_1,
-        sensor.ir_right_2,
-        sensor.ir_right_3
-    };
-    const int weights[7] = {-3, -2, -1, 0, 1, 2, 3};
-
-    int sum = 0;
-    int count = 0;
-    for (int i = 0; i < 7; ++i)
-    {
-        if (values[i])
-        {
-            sum += weights[i];
-            ++count;
-        }
-    }
-
-    line_seen = (count > 0);
-    if (!line_seen)
-    {
-        return last_error;
-    }
-
-    float error = float(sum) / float(count);
-    if (error > 0.1f)
-    {
-        last_turn_direction = 1;
-    }
-    else if (error < -0.1f)
-    {
-        last_turn_direction = -1;
-    }
-    return error;
-}
-
-void set_led_by_error(float error, bool line_seen)
-{
-    uint8_t r0 = 0, g0 = 0, b0 = 0;
-    uint8_t r1 = 0, g1 = 0, b1 = 0;
-
-    if (!line_seen)
-    {
-        // 丢线：黄色警告
-        r0 = r1 = 120;
-        g0 = g1 = 120;
-    }
-    else if (error > 0.6f)
-    {
-        // 偏右明显：右灯偏红
-        r1 = 120;
-        b0 = 40;
-    }
-    else if (error < -0.6f)
-    {
-        // 偏左明显：左灯偏红
-        r0 = 120;
-        b1 = 40;
-    }
-    else
-    {
-        // 中线附近：白色
-        r0 = g0 = b0 = 80;
-        r1 = g1 = b1 = 80;
-    }
-
-    pixels.setPixelColor(0, pixels.Color(r0, g0, b0));
-    pixels.setPixelColor(1, pixels.Color(r1, g1, b1));
-    pixels.show();
-}
+LineFollowMode currentMode = MODE_IDLE;
 
 void setup()
 {
-    shift_reg_init(); // 传感器初始化
-    motor_init();     // 电机初始化
-    pixels.begin();   // 彩色灯珠初始化
+    Serial.begin(9600);
+    shift_reg_init();    // 传感器初始化
+    motor_init();        // 电机初始化
+    pixels.begin();      // 彩色灯珠初始化
+    
+    // 启动提示：绿灯亮
+    pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+    pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+    pixels.show();
+    delay(500);
 }
 
 void loop()
 {
-    reload_shift_reg(); // 刷新传感器数据
-
-    bool line_seen = false;
-    float raw_error = calc_line_error_and_update_direction(line_seen);
-
-    // 一阶低通：抑制误差跳变，减少左右抖动
-    filtered_error = (1.0f - ALPHA) * filtered_error + ALPHA * raw_error;
-    float d_error = filtered_error - last_error;
-    last_error = filtered_error;
-
-    int motor_left = 0;
-    int motor_right = 0;
-
-    if (line_seen)
+    reload_shift_reg();  // 刷新传感器数据（必须）
+    
+    // ========== 碰撞开关处理（优先级最高，放在最前面） ==========
+    
+    // 左前碰撞开关
+    if(sensor.switcher_front_left_1 || sensor.switcher_front_left_2)
     {
-        int correction = int(KP * filtered_error + KD * d_error);
-        if (correction > MAX_CORRECTION) correction = MAX_CORRECTION;
-        if (correction < -MAX_CORRECTION) correction = -MAX_CORRECTION;
-
-        // ===== 高速转弯策略：内轮倒车，保持整体速度高 =====
-        if (ENABLE_REVERSE_TURN && abs(correction) > REVERSE_THRESHOLD)
+        pixels.setPixelColor(0, pixels.Color(100, 0, 0));
+        pixels.setPixelColor(1, pixels.Color(100, 0, 0));
+        pixels.show();
+        
+        motor_set_PWM(BACK_SPEED, -BACK_SPEED);  // 后退并右转
+        delay(300);
+        motor_set_PWM(0, 0);
+        delay(100);
+        
+        if(currentMode == MODE_IDLE)
         {
-            // 大转弯时，外轮加速，内轮倒车
-            if (correction > 0)
-            {
-                // 向右转：左轮快速前进，右轮倒车
-                motor_left = 255;  // 左轮最大速度
-                motor_right = -abs(correction);  // 右轮倒车（速度与转向幅度成正比）
-            }
-            else
-            {
-                // 向左转：右轮快速前进，左轮倒车
-                motor_left = -abs(correction);  // 左轮倒车
-                motor_right = 255;  // 右轮最大速度
-            }
+            pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+            pixels.setPixelColor(1, pixels.Color(0, 100, 0));
         }
         else
         {
-            // 小转弯时，使用差速前进（两轮都前进）
-            motor_left = BASE_SPEED + correction;
-            motor_right = BASE_SPEED - correction;
-
-            // 如果任一轮超过255，缩放以保持转向比例
-            if (motor_left > 255 || motor_right > 255)
-            {
-                float scale = 255.0f / max(motor_left, motor_right);
-                motor_left = (int)(motor_left * scale);
-                motor_right = (int)(motor_right * scale);
-            }
-
-            // 防止倒车
-            if (motor_left < 0) motor_left = 0;
-            if (motor_right < 0) motor_right = 0;
+            pixels.setPixelColor(0, pixels.Color(0, 0, 100));
+            pixels.setPixelColor(1, pixels.Color(0, 0, 100));
         }
-
-        // 最终限制
-        if (motor_left > 255) motor_left = 255;
-        if (motor_left < -255) motor_left = -255;
-        if (motor_right > 255) motor_right = 255;
-        if (motor_right < -255) motor_right = -255;
+        pixels.show();
     }
+    
+    // 右前碰撞开关
+    if(sensor.switcher_front_right_1 || sensor.switcher_front_right_2)
+    {
+        pixels.setPixelColor(0, pixels.Color(100, 0, 0));
+        pixels.setPixelColor(1, pixels.Color(100, 0, 0));
+        pixels.show();
+        
+        motor_set_PWM(-BACK_SPEED, BACK_SPEED);  // 后退并左转
+        delay(300);
+        motor_set_PWM(0, 0);
+        delay(100);
+        
+        if(currentMode == MODE_IDLE)
+        {
+            pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+            pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+        }
+        else
+        {
+            pixels.setPixelColor(0, pixels.Color(0, 0, 100));
+            pixels.setPixelColor(1, pixels.Color(0, 0, 100));
+        }
+        pixels.show();
+    }
+    
+    // 左后碰撞开关
+    if(sensor.switcher_back_left)
+    {
+        currentMode = MODE_ROTATE;
+        pixels.setPixelColor(0, pixels.Color(100, 0, 0));
+        pixels.setPixelColor(1, pixels.Color(100, 0, 0));
+        pixels.show();
+        
+        motor_step(150, 0, 48, 0);
+        motor_step(0, 0);
+        currentMode = MODE_IDLE;
+        
+        pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+        pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+        pixels.show();
+    }
+    
+    // 右后碰撞开关
+    if(sensor.switcher_back_right)
+    {
+        currentMode = MODE_ROTATE;
+        pixels.setPixelColor(0, pixels.Color(100, 0, 0));
+        pixels.setPixelColor(1, pixels.Color(100, 0, 0));
+        pixels.show();
+        
+        motor_step(0, 150, 0, 48);
+        motor_step(0, 0);
+        currentMode = MODE_IDLE;
+        
+        pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+        pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+        pixels.show();
+    }
+    
+    // ========== 按键控制模式切换 ==========
+    if(sensor.key_1)
+    {
+        while(sensor.key_1) reload_shift_reg();
+        delay(20);
+        
+        if(currentMode == MODE_IDLE)
+        {
+            currentMode = MODE_FOLLOW;
+            pixels.setPixelColor(0, pixels.Color(0, 0, 100));
+            pixels.setPixelColor(1, pixels.Color(0, 0, 100));
+            pixels.show();
+            delay(300);
+        }
+        else if(currentMode == MODE_FOLLOW)
+        {
+            currentMode = MODE_IDLE;
+            motor_set_PWM(0, 0);
+            pixels.setPixelColor(0, pixels.Color(0, 100, 0));
+            pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+            pixels.show();
+        }
+    }
+    
+    // ========== 巡线模式 ==========
+    if(currentMode == MODE_FOLLOW)
+    {
+        lineFollow();
+    }
+    
+    pixels.show();
+    delay(10);
+}
+
+// 巡线控制函数
+void lineFollow()
+{
+    int leftSpeed = BASE_SPEED;
+    int rightSpeed = BASE_SPEED;
+    
+    if(sensor.ir_mid)
+    {
+        leftSpeed = BASE_SPEED;
+        rightSpeed = BASE_SPEED;
+        pixels.setPixelColor(0, pixels.Color(100, 100, 100));
+        pixels.setPixelColor(1, pixels.Color(100, 100, 100));
+    }
+else if(sensor.ir_right_1 || sensor.ir_right_2 || sensor.ir_right_3)
+{
+    int turn_offset = 0;
+    int current_base = BASE_SPEED;
+
+    // --- 直角弯/急弯检测逻辑 ---
+    if(sensor.ir_right_3) 
+    {
+        // 判定为直角弯或严重偏移
+        // 1. 极高的转向增量，迫使计算结果出现负数
+        turn_offset = TURN_SPEED + 180; 
+        // 2. 大幅压低基础速度，抵消惯性
+        current_base = BASE_SPEED - 120; 
+    }
+    else if(sensor.ir_right_2) 
+    {
+        turn_offset = TURN_SPEED + 50;
+        current_base = BASE_SPEED - 40;
+    }
+    else // 只有 ir_right_1 亮
+    {
+        turn_offset = TURN_SPEED - 50; 
+        current_base = BASE_SPEED; 
+    }
+
+    rightSpeed = current_base - turn_offset;
+    leftSpeed  = current_base + turn_offset;
+
+    // --- 直角弯核心控制：强制内轮反转 ---
+    if(leftSpeed > 255) leftSpeed = 255;
+    
+    // 如果是直角弯(ir_right_3亮)，内轮必须给足负分分量实现原地自旋
+    // 注意：如果你的电机库不支持负数，请将此处改为 rightSpeed = 0; 但反转效果最好
+    if(rightSpeed < -180) rightSpeed = -180; 
+
+    pixels.setPixelColor(0, pixels.Color(0, 0, 100));
+    pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+}
+else if(sensor.ir_left_1 || sensor.ir_left_2 || sensor.ir_left_3)
+{
+    int turn_offset = 0;
+    int current_base = BASE_SPEED;
+
+    if(sensor.ir_left_3) 
+    {
+        turn_offset = TURN_SPEED + 180;
+        current_base = BASE_SPEED - 120;
+    }
+    else if(sensor.ir_left_2) 
+    {
+        turn_offset = TURN_SPEED + 50;
+        current_base = BASE_SPEED - 40;
+    }
+    else 
+    {
+        turn_offset = TURN_SPEED - 50;
+        current_base = BASE_SPEED;
+    }
+
+    leftSpeed  = current_base - turn_offset;
+    rightSpeed = current_base + turn_offset;
+
+    if(rightSpeed > 255) rightSpeed = 255;
+    if(leftSpeed < -180) leftSpeed = -180; 
+
+    pixels.setPixelColor(0, pixels.Color(0, 0, 100));
+    pixels.setPixelColor(1, pixels.Color(0, 100, 0));
+}
+
     else
     {
-        // 丢线策略：高速找线
-        if (last_turn_direction > 0)
-        {
-            motor_left = SEARCH_TURN_SPEED;
-            motor_right = -50;  // 右轮倒车找线
-        }
-        else
-        {
-            motor_left = -50;  // 左轮倒车找线
-            motor_right = SEARCH_TURN_SPEED;
-        }
+        leftSpeed = BASE_SPEED / 2;
+        rightSpeed = -BASE_SPEED / 2;
+        pixels.setPixelColor(0, pixels.Color(100, 0, 0));
+        pixels.setPixelColor(1, pixels.Color(100, 0, 0));
     }
-
-    set_led_by_error(filtered_error, line_seen);
-    motor_set_PWM(motor_left, motor_right);
-    delay(15);
+    
+    if(leftSpeed < -MAX_SPEED) leftSpeed = -MAX_SPEED;
+    if(leftSpeed > MAX_SPEED) leftSpeed = MAX_SPEED;
+    if(rightSpeed < -MAX_SPEED) rightSpeed = -MAX_SPEED;
+    if(rightSpeed > MAX_SPEED) rightSpeed = MAX_SPEED;
+    
+    motor_set_PWM(leftSpeed, rightSpeed);
 }
